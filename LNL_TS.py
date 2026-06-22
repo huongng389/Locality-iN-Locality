@@ -1,8 +1,7 @@
-"""
-Traffic-sign tuned LNL model for GTSRB.
+"""Traffic-sign tuned LNL model for GTSRB.
 
-This module keeps the original LNL/MoEx forward API so it can replace
-LNL_MoEx.py in the provided Colab notebook with only the import changed.
+This module keeps the original LNL/MoEx forward API and classifier shape, so
+the provided Colab notebook can use it by changing only the import line.
 """
 import torch
 import torch.nn as nn
@@ -12,27 +11,36 @@ from timm.models.registry import register_model
 from LNL_MoEx import LocalViT_TNT, default_cfgs
 
 
-class TrafficSignHead(nn.Module):
-    def __init__(self, in_features=192, num_classes=43, drop_rate=0.1):
-        super().__init__()
-        self.norm = nn.LayerNorm(in_features)
-        self.drop = nn.Dropout(drop_rate)
-        self.fc = nn.Linear(in_features, num_classes)
+class TrafficSignStem(nn.Sequential):
+    """A stronger local stem with the same output shape as the original 7x7 conv."""
 
-    def forward(self, x):
-        return self.fc(self.drop(self.norm(x)))
+    def __init__(self, in_chans=3, out_chans=12):
+        super().__init__()
+        self.add_module('conv1', nn.Conv2d(in_chans, out_chans, 3, stride=2, padding=1, bias=False))
+        self.add_module('bn1', nn.BatchNorm2d(out_chans))
+        self.add_module('act1', nn.GELU())
+        self.add_module(
+            'dwconv',
+            nn.Conv2d(out_chans, out_chans, 3, stride=2, padding=1, groups=out_chans, bias=False),
+        )
+        self.add_module('bn2', nn.BatchNorm2d(out_chans))
+        self.add_module('act2', nn.GELU())
+        self.add_module('pwconv', nn.Conv2d(out_chans, out_chans, 1, bias=False))
+        self.add_module('bn3', nn.BatchNorm2d(out_chans))
 
 
 class TrafficSignLNL(LocalViT_TNT):
-    """LNL-TNT with a regularized traffic-sign classification head."""
+    """LNL-TNT with a traffic-sign oriented convolutional stem."""
 
-    def __init__(self, num_classes=43, head_drop_rate=0.1, **kwargs):
+    def __init__(self, in_chans=3, num_classes=43, **kwargs):
+        in_dim = kwargs.get('in_dim', 12)
+        kwargs['in_chans'] = in_chans
         super().__init__(num_classes=num_classes, **kwargs)
-        self.head = TrafficSignHead(self.embed_dim, num_classes, head_drop_rate)
+        self.pixel_embed.proj = TrafficSignStem(in_chans=in_chans, out_chans=in_dim)
 
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
-        self.head = TrafficSignHead(self.embed_dim, num_classes)
+        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
 
 @register_model
@@ -53,6 +61,16 @@ def LNL_TS_Ti(pretrained=False, num_classes=43, **kwargs):
         load_pretrained(
             model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3))
     return model
+
+
+def LNL_Ti(pretrained=False, **kwargs):
+    """Drop-in replacement for ``from LNL import LNL_Ti as small``."""
+    return LNL_TS_Ti(pretrained=pretrained, **kwargs)
+
+
+def LNL_MoEx_Ti(pretrained=False, **kwargs):
+    """Drop-in replacement for ``from LNL_MoEx import LNL_MoEx_Ti as small``."""
+    return LNL_TS_Ti(pretrained=pretrained, **kwargs)
 
 
 def load_lnl_ts_checkpoint(path, map_location='cpu'):
