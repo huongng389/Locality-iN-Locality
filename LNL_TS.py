@@ -3,12 +3,19 @@
 This module keeps the original LNL/MoEx forward API and classifier shape, so
 the provided Colab notebook can use it by changing only the import line.
 """
+import os
 import torch
 import torch.nn as nn
-from timm.models.helpers import load_pretrained
 from timm.models.registry import register_model
 
 from LNL_MoEx import LocalViT_TNT, default_cfgs
+
+
+DEFAULT_PRETRAINED_PATHS = (
+    'pretrained/lnl_ts_ti_gtsrb.pth',
+    'lnl_ts_ti_gtsrb.pth',
+    'checkpoints/lnl_ts_ti_gtsrb_best.pth',
+)
 
 
 class TrafficSignStem(nn.Sequential):
@@ -58,8 +65,7 @@ def LNL_TS_Ti(pretrained=False, num_classes=43, **kwargs):
     )
     model.default_cfg = default_cfgs['tnt_t_conv_patch16_224']
     if pretrained:
-        load_pretrained(
-            model, num_classes=model.num_classes, in_chans=kwargs.get('in_chans', 3))
+        load_pretrained_weights(model, pretrained)
     return model
 
 
@@ -81,3 +87,23 @@ def load_lnl_ts_checkpoint(path, map_location='cpu'):
             if key in checkpoint:
                 return checkpoint[key]
     return checkpoint
+
+
+def load_pretrained_weights(model, pretrained=True):
+    if isinstance(pretrained, str):
+        candidate_paths = (pretrained,)
+    else:
+        candidate_paths = DEFAULT_PRETRAINED_PATHS
+
+    for path in candidate_paths:
+        if os.path.exists(path):
+            state_dict = load_lnl_ts_checkpoint(path, map_location='cpu')
+            model.load_state_dict(state_dict)
+            return model
+
+    searched = ', '.join(candidate_paths)
+    raise FileNotFoundError(
+        'LNL-TS pretrained weights were not found. '
+        f'Expected one of: {searched}. '
+        'Train the model first and save it as pretrained/lnl_ts_ti_gtsrb.pth.'
+    )
