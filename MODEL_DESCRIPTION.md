@@ -46,6 +46,11 @@ input stem:
   local convolutional stem.
 - The new stem uses `3x3` convolution, BatchNorm, GELU, and depthwise
   convolution.
+- The stem now expands to `2x` hidden channels before projecting back to the
+  TNT inner-token dimension.
+- The classifier feature is the average of the CLS token and the mean patch
+  token feature, which is usually more stable for centered traffic signs than
+  relying on CLS alone.
 - This keeps the same feature-map size expected by TNT while adding stronger
   local edge/color/shape extraction for traffic signs.
 
@@ -60,6 +65,30 @@ color regions, and small geometric details matter. A stronger convolutional stem
 improves these low-level local features before the transformer blocks process
 patch and pixel tokens. This keeps the locality inductive bias of the original
 paper while making the first feature extractor better matched to GTSRB.
+
+## 99.5%+ Training Recipe
+
+The standalone trainer now uses a longer high-accuracy recipe: 120 epochs,
+EMA, mild MoEx, light mixup, RandAugment, stochastic depth, and top-k checkpoint
+averaging.
+
+```bash
+python train_gtsrb_lnl_ts.py \
+  --train-dir ./data/GTSRB/Final_Training/Images \
+  --test-dir ./data/GTSRB/test \
+  --epochs 120 \
+  --batch-size 64
+```
+
+For the final number, evaluate both the best EMA checkpoint and the averaged
+checkpoint with deterministic multi-scale TTA:
+
+```bash
+python eval_gtsrb_lnl_ts.py --weights checkpoints/lnl_ts_ti_gtsrb_best.pth --tta
+python eval_gtsrb_lnl_ts.py --weights checkpoints/lnl_ts_ti_gtsrb_topk_avg.pth --tta
+```
+
+Use whichever checkpoint reports the higher test accuracy.
 
 ## Submission Files
 

@@ -21,33 +21,65 @@ DEFAULT_PRETRAINED_PATHS = (
 class TrafficSignStem(nn.Sequential):
     """A stronger local stem with the same output shape as the original 7x7 conv."""
 
-    def __init__(self, in_chans=3, out_chans=12):
+    def __init__(self, in_chans=3, out_chans=12, hidden_chans=None):
+        hidden_chans = hidden_chans or out_chans * 2
         super().__init__()
-        self.add_module('conv1', nn.Conv2d(in_chans, out_chans, 3, stride=2, padding=1, bias=False))
-        self.add_module('bn1', nn.BatchNorm2d(out_chans))
+        self.add_module('conv1', nn.Conv2d(in_chans, hidden_chans, 3, stride=2, padding=1, bias=False))
+        self.add_module('bn1', nn.BatchNorm2d(hidden_chans))
         self.add_module('act1', nn.GELU())
         self.add_module(
             'dwconv',
-            nn.Conv2d(out_chans, out_chans, 3, stride=2, padding=1, groups=out_chans, bias=False),
+            nn.Conv2d(hidden_chans, hidden_chans, 3, stride=2, padding=1, groups=hidden_chans, bias=False),
         )
-        self.add_module('bn2', nn.BatchNorm2d(out_chans))
+        self.add_module('bn2', nn.BatchNorm2d(hidden_chans))
         self.add_module('act2', nn.GELU())
-        self.add_module('pwconv', nn.Conv2d(out_chans, out_chans, 1, bias=False))
+        self.add_module('pwconv', nn.Conv2d(hidden_chans, out_chans, 1, bias=False))
         self.add_module('bn3', nn.BatchNorm2d(out_chans))
 
 
 class TrafficSignLNL(LocalViT_TNT):
     """LNL-TNT with a traffic-sign oriented convolutional stem."""
 
-    def __init__(self, in_chans=3, num_classes=43, **kwargs):
+    def __init__(self, in_chans=3, num_classes=43, global_pool='cls_patch', **kwargs):
         in_dim = kwargs.get('in_dim', 12)
         kwargs['in_chans'] = in_chans
         super().__init__(num_classes=num_classes, **kwargs)
+        self.global_pool = global_pool
         self.pixel_embed.proj = TrafficSignStem(in_chans=in_chans, out_chans=in_dim)
 
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+
+    def forward_features(self, x, swap_index, moex_norm, moex_epsilon, moex_layer, moex_positive_only):
+        attn_weights = []
+        batch_size = x.shape[0]
+        pixel_embed = self.pixel_embed(x, self.pixel_pos)
+
+        patch_embed = self.norm2_proj(
+            self.proj(self.norm1_proj(pixel_embed.reshape(batch_size, self.num_patches, -1)))
+        )
+        patch_embed = torch.cat((self.cls_token.expand(batch_size, -1, -1), patch_embed), dim=1)
+        patch_embed = self.pos_drop(patch_embed + self.patch_pos)
+
+        if swap_index is not None and moex_layer == 'stem':
+            from models.tnt_moex import moex
+            patch_embed = moex(patch_embed, swap_index, moex_norm, moex_epsilon, moex_positive_only)
+
+        for block in self.blocks:
+            pixel_embed, patch_embed, weights = block(pixel_embed, patch_embed)
+            attn_weights.append(weights)
+        patch_embed = self.norm(patch_embed)
+        features = patch_embed[:, 0]
+
+        if self.global_pool == 'cls':
+            return features, attn_weights
+
+        if self.global_pool == 'avg':
+            return patch_embed[:, 1:].mean(dim=1), attn_weights
+        if self.global_pool == 'cls_patch':
+            return 0.5 * (features + patch_embed[:, 1:].mean(dim=1)), attn_weights
+        raise ValueError(f'Unsupported global_pool={self.global_pool}')
 
 
 @register_model

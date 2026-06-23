@@ -3,6 +3,7 @@ import argparse
 import torch
 import torchvision
 import torchvision.transforms as transforms
+from torchvision.transforms import InterpolationMode
 from torch.utils.data import DataLoader
 
 from LNL_TS import LNL_TS_Ti, load_lnl_ts_checkpoint
@@ -14,21 +15,33 @@ def parse_args():
     parser.add_argument('--weights', default='./checkpoints/lnl_ts_ti_gtsrb_best.pth')
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--num-workers', type=int, default=2)
-    parser.add_argument('--tta', action='store_true', help='Use 5-crop test-time augmentation.')
+    parser.add_argument('--tta', action='store_true', help='Use deterministic multi-scale crop TTA.')
     return parser.parse_args()
 
 
 def build_transform(use_tta):
     if not use_tta:
         return transforms.Compose([
-            transforms.Resize((224, 224)),
+            transforms.Resize((224, 224), interpolation=InterpolationMode.BICUBIC),
             transforms.ToTensor(),
         ])
-    return transforms.Compose([
-        transforms.Resize((240, 240)),
-        transforms.FiveCrop(224),
-        transforms.Lambda(lambda crops: torch.stack([transforms.ToTensor()(crop) for crop in crops])),
-    ])
+
+    to_tensor = transforms.ToTensor()
+
+    def multi_scale_crops(image):
+        crops = []
+        for resize_size in (224, 240, 256):
+            resized = transforms.Resize(
+                (resize_size, resize_size),
+                interpolation=InterpolationMode.BICUBIC,
+            )(image)
+            if resize_size == 224:
+                crops.append(to_tensor(resized))
+            else:
+                crops.extend(to_tensor(crop) for crop in transforms.FiveCrop(224)(resized))
+        return torch.stack(crops)
+
+    return multi_scale_crops
 
 
 @torch.no_grad()
