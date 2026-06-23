@@ -66,18 +66,40 @@ improves these low-level local features before the transformer blocks process
 patch and pixel tokens. This keeps the locality inductive bias of the original
 paper while making the first feature extractor better matched to GTSRB.
 
-## 99.5%+ Training Recipe
+## Latest Notebook Result
 
-The standalone trainer now uses a longer high-accuracy recipe: 120 epochs,
-EMA, mild MoEx, light mixup, RandAugment, stochastic depth, and top-k checkpoint
-averaging.
+`tried_to_improve/improve_4_.ipynb` reports the current best result from the
+non-MoEx `LNL_TS.LNL_Ti` path:
+
+- GTSRB Top-1: 99.24%
+- FGSM robust accuracy: 89.15%
+- PGD robust accuracy: 54.79%
+- Parameters: 6.08M
+- Complexity: 1.25 GMac
+
+The MoEx path in the same notebook reports lower clean accuracy, so the next
+99.5%+ attempt should fine-tune from the non-MoEx LNL-TS checkpoint first.
+
+## 99.5%+ Fine-Tuning Recipe
+
+Continue from `pretrained/lnl_ts_ti_gtsrb.pth` with mild augmentation, low
+learning rate, EMA, and TTA-based checkpoint selection:
 
 ```bash
 python train_gtsrb_lnl_ts.py \
   --train-dir ./data/GTSRB/Final_Training/Images \
   --test-dir ./data/GTSRB/test \
-  --epochs 120 \
-  --batch-size 64
+  --resume-weights pretrained/lnl_ts_ti_gtsrb.pth \
+  --epochs 20 \
+  --batch-size 64 \
+  --lr 1e-4 \
+  --weight-decay 2e-2 \
+  --aug-level finetune \
+  --moex-prob 0.0 \
+  --mixup-alpha 0.0 \
+  --drop-rate 0.0 \
+  --drop-path-rate 0.02 \
+  --select-tta
 ```
 
 For the final number, evaluate both the best EMA checkpoint and the averaged
@@ -89,6 +111,10 @@ python eval_gtsrb_lnl_ts.py --weights checkpoints/lnl_ts_ti_gtsrb_topk_avg.pth -
 ```
 
 Use whichever checkpoint reports the higher test accuracy.
+
+The same recipe has also been appended to
+`tried_to_improve/improve_4_.ipynb` as a new fine-tuning section that saves
+`pretrained/lnl_ts_ti_gtsrb_finetuned.pth`.
 
 ## Submission Files
 

@@ -21,6 +21,7 @@ def parse_args():
     parser.add_argument('--train-dir', default='./data/GTSRB/Final_Training/Images')
     parser.add_argument('--test-dir', default='./data/GTSRB/test')
     parser.add_argument('--output-dir', default='./checkpoints')
+    parser.add_argument('--resume-weights', default='', help='Optional state_dict/checkpoint to fine-tune from.')
     parser.add_argument('--epochs', type=int, default=120)
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=5e-4)
@@ -35,6 +36,15 @@ def parse_args():
     parser.add_argument('--ema-decay', type=float, default=0.999)
     parser.add_argument('--drop-rate', type=float, default=0.03)
     parser.add_argument('--drop-path-rate', type=float, default=0.05)
+    parser.add_argument('--global-pool', choices=('cls', 'avg', 'cls_patch'), default='cls_patch')
+    parser.add_argument('--stem-hidden-ratio', type=float, default=2.0)
+    parser.add_argument('--select-tta', action='store_true', help='Use multi-scale TTA when selecting best checkpoints.')
+    parser.add_argument(
+        '--aug-level',
+        choices=('none', 'finetune', 'strong'),
+        default='strong',
+        help='Training augmentation strength.',
+    )
     parser.add_argument('--topk-average', type=int, default=5)
     parser.add_argument('--seed', type=int, default=42)
     return parser.parse_args()
@@ -48,8 +58,29 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = True
 
 
-def build_transforms():
-    train_transform = transforms.Compose([
+def build_transforms(aug_level):
+    if aug_level == 'none':
+        train_transform = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+        ])
+    elif aug_level == 'finetune':
+        train_transform = transforms.Compose([
+            transforms.Resize((224, 224), interpolation=InterpolationMode.BICUBIC),
+            transforms.RandomApply([
+                transforms.RandomAffine(
+                    degrees=5,
+                    translate=(0.02, 0.02),
+                    scale=(0.96, 1.04),
+                    shear=2,
+                    interpolation=InterpolationMode.BILINEAR,
+                )
+            ], p=0.35),
+            transforms.ColorJitter(brightness=0.12, contrast=0.12, saturation=0.08, hue=0.01),
+            transforms.ToTensor(),
+        ])
+    else:
+        train_transform = transforms.Compose([
         transforms.RandomResizedCrop(
             224,
             scale=(0.82, 1.0),
@@ -71,7 +102,7 @@ def build_transforms():
         transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.8))], p=0.08),
         transforms.ToTensor(),
         transforms.RandomErasing(p=0.10, scale=(0.005, 0.035), ratio=(0.3, 3.3), value='random'),
-    ])
+        ])
     eval_transform = transforms.Compose([
         transforms.Resize((224, 224), interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
@@ -108,18 +139,24 @@ class ModelEma:
                 value.copy_(model_value)
 
 
-def accuracy(model, loader, device):
+@torch.no_grad()
+def accuracy(model, loader, device, use_tta=False):
     model.eval()
     correct = 0
     total = 0
-    with torch.no_grad():
-        for images, labels in loader:
+    for images, labels in loader:
+        labels = labels.to(device, non_blocking=True)
+        if use_tta:
+            batch_size, crops, channels, height, width = images.shape
+            images = images.view(batch_size * crops, channels, height, width)
             images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            outputs = model(images).view(batch_size, crops, -1).mean(dim=1)
+        else:
+            images = images.to(device, non_blocking=True)
             outputs = model(images)
-            predicted = outputs.argmax(dim=1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
+        predicted = outputs.argmax(dim=1)
+        total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
     return 100.0 * correct / total
 
 
@@ -229,15 +266,46 @@ def average_state_dicts(state_dicts):
     return avg
 
 
+def load_checkpoint_state(path):
+    checkpoint = torch.load(path, map_location='cpu')
+    if isinstance(checkpoint, dict):
+        for key in ('model', 'model_state', 'state_dict'):
+            if key in checkpoint:
+                return checkpoint[key]
+    return checkpoint
+
+
+def build_tta_transform():
+    to_tensor = transforms.ToTensor()
+
+    def multi_scale_crops(image):
+        crops = []
+        for resize_size in (224, 240, 256):
+            resized = transforms.Resize(
+                (resize_size, resize_size),
+                interpolation=InterpolationMode.BICUBIC,
+            )(image)
+            if resize_size == 224:
+                crops.append(to_tensor(resized))
+            else:
+                crops.extend(to_tensor(crop) for crop in transforms.FiveCrop(224)(resized))
+        return torch.stack(crops)
+
+    return multi_scale_crops
+
+
 def main():
     args = parse_args()
     seed_everything(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    train_transform, eval_transform = build_transforms()
+    train_transform, eval_transform = build_transforms(args.aug_level)
     trainset = torchvision.datasets.ImageFolder(args.train_dir, transform=train_transform)
-    testset = torchvision.datasets.ImageFolder(args.test_dir, transform=eval_transform)
+    testset = torchvision.datasets.ImageFolder(
+        args.test_dir,
+        transform=build_tta_transform() if args.select_tta else eval_transform,
+    )
 
     train_loader = DataLoader(
         trainset,
@@ -259,7 +327,12 @@ def main():
         num_classes=43,
         drop_rate=args.drop_rate,
         drop_path_rate=args.drop_path_rate,
+        global_pool=args.global_pool,
+        stem_hidden_ratio=args.stem_hidden_ratio,
     ).to(device)
+    if args.resume_weights:
+        model.load_state_dict(load_checkpoint_state(args.resume_weights), strict=True)
+        print(f'Loaded weights from {args.resume_weights}')
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = cosine_with_warmup(optimizer, args.warmup_epochs, args.epochs)
@@ -272,8 +345,8 @@ def main():
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler, ema, device, args)
         scheduler.step()
 
-        raw_acc = accuracy(model, test_loader, device)
-        ema_acc = accuracy(ema.module, test_loader, device)
+        raw_acc = accuracy(model, test_loader, device, use_tta=args.select_tta)
+        ema_acc = accuracy(ema.module, test_loader, device, use_tta=args.select_tta)
         current_acc = max(raw_acc, ema_acc)
         print(
             f'Epoch [{epoch + 1}/{args.epochs}] '

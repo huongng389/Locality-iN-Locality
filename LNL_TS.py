@@ -12,6 +12,7 @@ from LNL_MoEx import LocalViT_TNT, default_cfgs
 
 
 DEFAULT_PRETRAINED_PATHS = (
+    'pretrained/lnl_ts_ti_gtsrb_finetuned.pth',
     'pretrained/lnl_ts_ti_gtsrb.pth',
     'lnl_ts_ti_gtsrb.pth',
     'checkpoints/lnl_ts_ti_gtsrb_best.pth',
@@ -40,12 +41,17 @@ class TrafficSignStem(nn.Sequential):
 class TrafficSignLNL(LocalViT_TNT):
     """LNL-TNT with a traffic-sign oriented convolutional stem."""
 
-    def __init__(self, in_chans=3, num_classes=43, global_pool='cls_patch', **kwargs):
+    def __init__(self, in_chans=3, num_classes=43, global_pool='cls_patch', stem_hidden_ratio=2.0, **kwargs):
         in_dim = kwargs.get('in_dim', 12)
         kwargs['in_chans'] = in_chans
         super().__init__(num_classes=num_classes, **kwargs)
         self.global_pool = global_pool
-        self.pixel_embed.proj = TrafficSignStem(in_chans=in_chans, out_chans=in_dim)
+        stem_hidden_chans = max(in_dim, int(round(in_dim * stem_hidden_ratio)))
+        self.pixel_embed.proj = TrafficSignStem(
+            in_chans=in_chans,
+            out_chans=in_dim,
+            hidden_chans=stem_hidden_chans,
+        )
 
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
