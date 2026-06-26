@@ -1,23 +1,7 @@
-"""
-LNL/TNT-family improvement for GTSRB.
-
-This module keeps the plug-and-play interface used by the original notebook:
-
-    from LNL_Ti_996 import LNL_Ti_996 as small
-    model = small(pretrained=False)
-    model.head = torch.nn.Linear(in_features=192, out_features=43, bias=True)
-
-The backbone remains Locality-iN-Locality's LocalViT_TNT tiny model. The main
-model-side improvement is a stronger traffic-sign classification head that can
-use both CLS-token and patch-token context while still exposing a 192-dimensional
-``head`` interface for the original Colab cells.
-"""
-
 import torch
 import torch.nn as nn
 
 from LNL import LocalViT_TNT, default_cfgs
-
 
 class TrafficSignTokenPool(nn.Module):
     """Fuse CLS, average patch, and max patch information back to 192 features."""
